@@ -2,3 +2,4 @@ streamlit
 pandas
 folium
 scikit-learn
+geopy
