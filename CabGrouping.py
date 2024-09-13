@@ -100,6 +100,7 @@ if run_button:
                 adjusted_df['TaxiGroup'] = ''  # Initialize the 'TaxiGroup' column with empty strings
 
                 taxi_group_counter = 1
+
                 for cluster in df['Cluster'].unique():
                     cluster_df = df[df['Cluster'] == cluster].copy()
 
@@ -110,6 +111,7 @@ if run_button:
                         ), axis=1)
                     cluster_df = cluster_df.sort_values(by='Distance')
 
+                    group_list = []
                     while len(cluster_df) > 0:
                         group = pd.DataFrame()
                         unique_postals = set()
@@ -117,7 +119,7 @@ if run_button:
 
                         for i, row in cluster_df.iterrows():
                             potential_postals = unique_postals.union([row['PickUpPostal'], row['DropOffPostal']])
-                            
+
                             if len(potential_postals) > max_unique_postals or group_size >= max_group_size:
                                 break
 
@@ -125,11 +127,27 @@ if run_button:
                             group = pd.concat([group, pd.DataFrame([row])])
                             group_size += 1
 
-                        group['TaxiGroup'] = f'Taxi {taxi_group_counter}'
-                        adjusted_df = pd.concat([adjusted_df, group], ignore_index=True)
-
+                        group_list.append(group)
                         cluster_df = cluster_df.drop(group.index)
 
+                    # Reallocate if there's only 1 person in a group
+                    if len(group_list) > 1 and len(group_list[-1]) == 1:
+                        # Merge last two groups together and split evenly
+                        merged_group = pd.concat([group_list[-2], group_list[-1]], ignore_index=True)
+                        group_list = group_list[:-2]  # Remove last two groups
+
+                        # Split evenly between two groups
+                        split_point = len(merged_group) // 2
+                        group_1 = merged_group.iloc[:split_point]
+                        group_2 = merged_group.iloc[split_point:]
+
+                        group_list.append(group_1)
+                        group_list.append(group_2)
+
+                    # Assign taxi groups
+                    for group in group_list:
+                        group['TaxiGroup'] = f'Taxi {taxi_group_counter}'
+                        adjusted_df = pd.concat([adjusted_df, group], ignore_index=True)
                         taxi_group_counter += 1
 
                 return adjusted_df
@@ -170,6 +188,7 @@ if run_button:
                         icon=folium.Icon(color='red', icon='home')
                     ).add_to(m)
 
+                    # Add drop-off marker
                     folium.Marker(
                         location=[row['DropOff_Latitude'], row['DropOff_Longitude']],
                         popup=f"Drop-Off: {row['DropOffPostal']} | Group: {row['TaxiGroup']}",
