@@ -16,6 +16,7 @@ if 'max_distance' not in st.session_state:
 st.set_page_config(layout="wide")
 
 st.markdown("<h1 style='text-align: center;'>Taxi Grouping Optimization</h1>", unsafe_allow_html=True)
+st.caption(f"Version {__version__}")
 
 with st.sidebar:
     st.header("Upload Master File")
