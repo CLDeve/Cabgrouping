@@ -8,7 +8,7 @@ from sklearn.cluster import DBSCAN
 import numpy as np
 from geopy.distance import geodesic
 
-__version__ = "v0.0.0.2"
+__version__ = "v0.0.0.3"
 
 if 'max_distance' not in st.session_state:
     st.session_state.max_distance = 0
@@ -103,13 +103,13 @@ if run_button:
                     return digits.zfill(6)
                 return digits[:6]
 
-            def build_postal_groups(df):
+            def build_dropoff_groups(df):
                 groups = []
-                for postal, g in df.groupby('PickUpPostalNorm'):
+                for postal, g in df.groupby('DropOffPostalNorm'):
                     groups.append({
-                        'postal': postal,
-                        'lat': g['PickUp_Latitude'].mean(),
-                        'lon': g['PickUp_Longitude'].mean(),
+                        'drop_postal': postal,
+                        'pick_lat': g['PickUp_Latitude'].mean(),
+                        'pick_lon': g['PickUp_Longitude'].mean(),
                         'drop_lat': g['DropOff_Latitude'].mean(),
                         'drop_lon': g['DropOff_Longitude'].mean(),
                         'indices': g.index.tolist(),
@@ -128,10 +128,10 @@ if run_button:
                     return {}
                 if len(postal_groups) == 1:
                     return {0: postal_groups}
-                ref_lat = np.mean([g['lat'] for g in postal_groups] + [g['drop_lat'] for g in postal_groups])
+                ref_lat = np.mean([g['pick_lat'] for g in postal_groups] + [g['drop_lat'] for g in postal_groups])
                 coords = []
                 for g in postal_groups:
-                    px, py = latlon_to_km(g['lat'], g['lon'], ref_lat)
+                    px, py = latlon_to_km(g['pick_lat'], g['pick_lon'], ref_lat)
                     dx, dy = latlon_to_km(g['drop_lat'], g['drop_lon'], ref_lat)
                     coords.append([px, py, dx, dy])
                 coords = np.array(coords)
@@ -146,7 +146,7 @@ if run_button:
                     clustered.setdefault(label, []).append(g)
                 return clustered
 
-            def pack_into_taxis(cluster_groups, max_group_size=4, max_unique_postals=4, start_counter=1):
+            def pack_into_taxis(cluster_groups, max_group_size=4, max_unique_dropoffs=4, start_counter=1):
                 taxi_group_counter = start_counter
                 assignments = {}
 
@@ -156,7 +156,7 @@ if run_button:
                     groups_sorted = sorted(groups, key=lambda x: x['size'], reverse=True)
 
                     for g in groups_sorted:
-                        postal = g['postal']
+                        drop_postal = g['drop_postal']
                         indices = g['indices']
 
                         # Split only if the same postal exceeds capacity.
@@ -168,17 +168,17 @@ if run_button:
                                 capacity_left = max_group_size - len(taxi['indices'])
                                 if len(chunk) > capacity_left:
                                     continue
-                                if postal not in taxi['postals'] and len(taxi['postals']) >= max_unique_postals:
+                                if drop_postal not in taxi['drop_postals'] and len(taxi['drop_postals']) >= max_unique_dropoffs:
                                     continue
                                 taxi['indices'].extend(chunk)
-                                taxi['postals'].add(postal)
+                                taxi['drop_postals'].add(drop_postal)
                                 placed = True
                                 break
 
                             if not placed:
                                 taxis.append({
                                     'indices': list(chunk),
-                                    'postals': {postal}
+                                    'drop_postals': {drop_postal}
                                 })
 
                     for taxi in taxis:
@@ -189,14 +189,14 @@ if run_button:
 
                 return assignments, taxi_group_counter
 
-            dropoff_df['PickUpPostalNorm'] = dropoff_df['PickUpPostal'].apply(normalize_postal)
+            dropoff_df['DropOffPostalNorm'] = dropoff_df['DropOffPostal'].apply(normalize_postal)
 
-            postal_groups = build_postal_groups(dropoff_df)
-            clustered_groups = cluster_postal_groups(postal_groups, eps_km=1.5, min_samples=2)
+            dropoff_groups = build_dropoff_groups(dropoff_df)
+            clustered_groups = cluster_postal_groups(dropoff_groups, eps_km=1.5, min_samples=2)
 
             assignments, _ = pack_into_taxis(
                 clustered_groups,
-                max_unique_postals=4,
+                max_unique_dropoffs=4,
                 max_group_size=4,
                 start_counter=1
             )
