@@ -7,7 +7,7 @@ import math
 from sklearn.cluster import KMeans
 from geopy.distance import geodesic
 
-__version__ = "v0.0.0.9"
+__version__ = "v0.0.1.0"
 
 if 'max_distance' not in st.session_state:
     st.session_state.max_distance = 0
@@ -137,15 +137,53 @@ if run_button:
 
                 return adjusted_df
 
-            centroid = calculate_centroid(dropoff_df)
+            def assign_groups_dropoff_first(df, max_group_size=4):
+                # Keep the same drop-off together (split only if > max_group_size).
+                centroid = (df['DropOff_Latitude'].mean(), df['DropOff_Longitude'].mean())
+                dropoff_groups = []
+                for dropoff, g in df.groupby('DropOffPostal'):
+                    lat = g['DropOff_Latitude'].mean()
+                    lon = g['DropOff_Longitude'].mean()
+                    dist = calculate_distance(centroid, (lat, lon))
+                    dropoff_groups.append({
+                        'dropoff': dropoff,
+                        'indices': g.index.tolist(),
+                        'dist': dist
+                    })
 
-            dropoff_df = sort_by_distance_from_centroid(dropoff_df, centroid)
+                dropoff_groups = sorted(dropoff_groups, key=lambda x: x['dist'])
 
-            num_clusters = determine_clusters_needed(dropoff_df, max_group_size=4)
+                taxis = []
+                for group in dropoff_groups:
+                    indices = group['indices']
+                    chunks = [indices[i:i + max_group_size] for i in range(0, len(indices), max_group_size)]
 
-            dropoff_df, kmeans = cluster_passengers(dropoff_df, num_clusters)
+                    for chunk in chunks:
+                        best_taxi = None
+                        best_score = None
+                        for taxi in taxis:
+                            capacity_left = max_group_size - len(taxi['indices'])
+                            if len(chunk) > capacity_left:
+                                continue
+                            score = capacity_left - len(chunk)
+                            if best_score is None or score < best_score:
+                                best_score = score
+                                best_taxi = taxi
 
-            dropoff_df = adjust_groups(dropoff_df, max_unique_postals=4, max_group_size=4)
+                        if best_taxi is None:
+                            taxis.append({'indices': list(chunk)})
+                        else:
+                            best_taxi['indices'].extend(chunk)
+
+                assignments = {}
+                for i, taxi in enumerate(taxis, start=1):
+                    for idx in taxi['indices']:
+                        assignments[idx] = f'Taxi {i}'
+
+                df['TaxiGroup'] = df.index.map(assignments.get)
+                return df
+
+            dropoff_df = assign_groups_dropoff_first(dropoff_df, max_group_size=4)
 
             output_excel_file_path = 'Taxi_Grouped_Data.xlsx'
             dropoff_df.to_excel(output_excel_file_path, index=False)
