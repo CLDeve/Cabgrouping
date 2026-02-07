@@ -5,10 +5,7 @@ from folium.plugins import MarkerCluster
 import streamlit.components.v1 as components
 import math
 from sklearn.cluster import KMeans
-import numpy as np
 from geopy.distance import geodesic
-
-__version__ = "v0.0.0.6"
 
 if 'max_distance' not in st.session_state:
     st.session_state.max_distance = 0
@@ -16,7 +13,6 @@ if 'max_distance' not in st.session_state:
 st.set_page_config(layout="wide")
 
 st.markdown("<h1 style='text-align: center;'>Taxi Grouping Optimization</h1>", unsafe_allow_html=True)
-st.caption(f"Version {__version__}")
 
 with st.sidebar:
     st.header("Upload Master File")
@@ -43,9 +39,9 @@ if run_button:
         # Update the status to show "Processing..."
         status_placeholder.text("Processing...")
 
-        master_df = pd.read_excel(master_file, dtype={'PostalCode': str})
+        master_df = pd.read_excel(master_file)
 
-        upload_df = pd.read_excel(upload_file, dtype={'PickUpPostal': str, 'DropOffPostal': str})
+        upload_df = pd.read_excel(upload_file)
 
         if 'StaffID' in upload_df.columns:
             upload_df = upload_df.drop_duplicates(subset=['StaffID'], keep='first')
@@ -61,11 +57,11 @@ if run_button:
 
         if not missing_pickup.empty or not missing_dropoff.empty:
             st.warning("Some postal codes in the uploaded file do not have matching latitude and longitude in the master file.")
-            
+
             if not missing_pickup.empty:
                 st.subheader("Missing Pick-Up Postal Codes")
                 st.dataframe(missing_pickup[['PickUpPostal']].drop_duplicates())
-            
+
             if not missing_dropoff.empty:
                 st.subheader("Missing Drop-Off Postal Codes")
                 st.dataframe(missing_dropoff[['DropOffPostal']].drop_duplicates())
@@ -89,124 +85,64 @@ if run_button:
                 df = df.sort_values(by='DistanceFromCentroid')
                 return df
 
-            def determine_clusters_needed(total_items, max_group_size, max_groups):
-                num_clusters = max(math.ceil(total_items / max_group_size), 1)
-                return min(num_clusters, max_groups)
+            def determine_clusters_needed(df, max_group_size):
+                num_clusters = max(math.ceil(len(df) / max_group_size), 1)
+                return num_clusters
 
-            def normalize_postal(code):
-                if pd.isna(code):
-                    return None
-                digits = ''.join(ch for ch in str(code).strip() if ch.isdigit())
-                if len(digits) < 2:
-                    return None
-                if len(digits) <= 6:
-                    return digits.zfill(6)
-                return digits[:6]
+            def cluster_passengers(df, n_clusters):
+                combined_coords = df[['PickUp_Latitude', 'PickUp_Longitude', 'DropOff_Latitude', 'DropOff_Longitude']].copy()
+                kmeans = KMeans(n_clusters=n_clusters, n_init=10, random_state=0).fit(combined_coords)
+                df['Cluster'] = kmeans.labels_
+                return df, kmeans
 
-            def build_dropoff_groups(df):
-                groups = []
-                for postal, g in df.groupby('DropOffPostalNorm'):
-                    groups.append({
-                        'drop_postal': postal,
-                        'pick_lat': g['PickUp_Latitude'].mean(),
-                        'pick_lon': g['PickUp_Longitude'].mean(),
-                        'drop_lat': g['DropOff_Latitude'].mean(),
-                        'drop_lon': g['DropOff_Longitude'].mean(),
-                        'indices': g.index.tolist(),
-                        'size': len(g)
-                    })
-                return groups
+            def adjust_groups(df, max_unique_postals=4, max_group_size=4):
+                adjusted_df = pd.DataFrame(columns=df.columns)
+                adjusted_df['TaxiGroup'] = ''  # Initialize the 'TaxiGroup' column with empty strings
 
-            def latlon_to_km(lat, lon, ref_lat):
-                # Approximate conversion to km for small geographic areas.
-                km_per_deg_lat = 110.574
-                km_per_deg_lon = 111.320 * math.cos(math.radians(ref_lat))
-                return lon * km_per_deg_lon, lat * km_per_deg_lat
+                taxi_group_counter = 1
+                for cluster in df['Cluster'].unique():
+                    cluster_df = df[df['Cluster'] == cluster].copy()
 
-            def cluster_dropoff_groups_kmeans(dropoff_groups, max_group_size=4):
-                if not dropoff_groups:
-                    return {}
-                if len(dropoff_groups) == 1:
-                    return {0: dropoff_groups}
-                total_items = sum(g['size'] for g in dropoff_groups)
-                n_clusters = determine_clusters_needed(total_items, max_group_size, len(dropoff_groups))
-                ref_lat = np.mean([g['pick_lat'] for g in dropoff_groups] + [g['drop_lat'] for g in dropoff_groups])
-                coords = []
-                for g in dropoff_groups:
-                    px, py = latlon_to_km(g['pick_lat'], g['pick_lon'], ref_lat)
-                    dx, dy = latlon_to_km(g['drop_lat'], g['drop_lon'], ref_lat)
-                    coords.append([px, py, dx, dy])
-                coords = np.array(coords)
-                kmeans = KMeans(n_clusters=n_clusters, n_init=10, random_state=0).fit(coords)
-                labels = kmeans.labels_
-                clustered = {}
-                for g, label in zip(dropoff_groups, labels):
-                    clustered.setdefault(label, []).append(g)
-                return clustered
+                    cluster_df['Distance'] = cluster_df.apply(
+                        lambda row: calculate_distance(
+                            (row['PickUp_Latitude'], row['PickUp_Longitude']),
+                            (row['DropOff_Latitude'], row['DropOff_Longitude'])
+                        ), axis=1)
+                    cluster_df = cluster_df.sort_values(by='Distance')
 
-            def pack_into_taxis(cluster_groups, max_group_size=4, max_unique_dropoffs=4, start_counter=1):
-                taxi_group_counter = start_counter
-                assignments = {}
-                taxis = []
+                    while len(cluster_df) > 0:
+                        group = pd.DataFrame()
+                        unique_postals = set()
+                        group_size = 0
 
-                for _, groups in cluster_groups.items():
-                    # Prioritize larger postal groups so they stay together when possible.
-                    groups_sorted = sorted(groups, key=lambda x: x['size'], reverse=True)
+                        for i, row in cluster_df.iterrows():
+                            potential_postals = unique_postals.union([row['PickUpPostal'], row['DropOffPostal']])
 
-                    for g in groups_sorted:
-                        drop_postal = g['drop_postal']
-                        indices = g['indices']
+                            if len(potential_postals) > max_unique_postals or group_size >= max_group_size:
+                                break
 
-                        # Split only if the same postal exceeds capacity.
-                        chunks = [indices[i:i + max_group_size] for i in range(0, len(indices), max_group_size)]
+                            unique_postals = potential_postals
+                            group = pd.concat([group, pd.DataFrame([row])])
+                            group_size += 1
 
-                        for chunk in chunks:
-                            best_taxi = None
-                            best_score = None
+                        group['TaxiGroup'] = f'Taxi {taxi_group_counter}'
+                        adjusted_df = pd.concat([adjusted_df, group], ignore_index=True)
 
-                            for taxi in taxis:
-                                capacity_left = max_group_size - len(taxi['indices'])
-                                if len(chunk) > capacity_left:
-                                    continue
-                                adds_new_dropoff = drop_postal not in taxi['drop_postals']
-                                if adds_new_dropoff and len(taxi['drop_postals']) >= max_unique_dropoffs:
-                                    continue
-                                # Best-fit: minimize leftover capacity; prefer not adding new dropoff.
-                                score = (capacity_left - len(chunk), 1 if adds_new_dropoff else 0)
-                                if best_score is None or score < best_score:
-                                    best_score = score
-                                    best_taxi = taxi
+                        cluster_df = cluster_df.drop(group.index)
 
-                            if best_taxi is not None:
-                                best_taxi['indices'].extend(chunk)
-                                best_taxi['drop_postals'].add(drop_postal)
-                            else:
-                                taxis.append({
-                                    'indices': list(chunk),
-                                    'drop_postals': {drop_postal}
-                                })
-
-                    for taxi in taxis:
-                        taxi_label = f'Taxi {taxi_group_counter}'
-                        for idx in taxi['indices']:
-                            assignments[idx] = taxi_label
                         taxi_group_counter += 1
 
-                return assignments, taxi_group_counter
+                return adjusted_df
 
-            dropoff_df['DropOffPostalNorm'] = dropoff_df['DropOffPostal'].apply(normalize_postal)
+            centroid = calculate_centroid(dropoff_df)
 
-            dropoff_groups = build_dropoff_groups(dropoff_df)
-            clustered_groups = cluster_dropoff_groups_kmeans(dropoff_groups, max_group_size=4)
+            dropoff_df = sort_by_distance_from_centroid(dropoff_df, centroid)
 
-            assignments, _ = pack_into_taxis(
-                clustered_groups,
-                max_unique_dropoffs=4,
-                max_group_size=4,
-                start_counter=1
-            )
+            num_clusters = determine_clusters_needed(dropoff_df, max_group_size=4)
 
-            dropoff_df['TaxiGroup'] = dropoff_df.index.map(assignments.get)
+            dropoff_df, kmeans = cluster_passengers(dropoff_df, num_clusters)
+
+            dropoff_df = adjust_groups(dropoff_df, max_unique_postals=4, max_group_size=4)
 
             output_excel_file_path = 'Taxi_Grouped_Data.xlsx'
             dropoff_df.to_excel(output_excel_file_path, index=False)
