@@ -8,7 +8,7 @@ from sklearn.cluster import KMeans
 import numpy as np
 from geopy.distance import geodesic
 
-__version__ = "v0.0.0.4"
+__version__ = "v0.0.0.5"
 
 if 'max_distance' not in st.session_state:
     st.session_state.max_distance = 0
@@ -161,19 +161,26 @@ if run_button:
                         chunks = [indices[i:i + max_group_size] for i in range(0, len(indices), max_group_size)]
 
                         for chunk in chunks:
-                            placed = False
+                            best_taxi = None
+                            best_score = None
+
                             for taxi in taxis:
                                 capacity_left = max_group_size - len(taxi['indices'])
                                 if len(chunk) > capacity_left:
                                     continue
-                                if drop_postal not in taxi['drop_postals'] and len(taxi['drop_postals']) >= max_unique_dropoffs:
+                                adds_new_dropoff = drop_postal not in taxi['drop_postals']
+                                if adds_new_dropoff and len(taxi['drop_postals']) >= max_unique_dropoffs:
                                     continue
-                                taxi['indices'].extend(chunk)
-                                taxi['drop_postals'].add(drop_postal)
-                                placed = True
-                                break
+                                # Best-fit: minimize leftover capacity; prefer not adding new dropoff.
+                                score = (capacity_left - len(chunk), 1 if adds_new_dropoff else 0)
+                                if best_score is None or score < best_score:
+                                    best_score = score
+                                    best_taxi = taxi
 
-                            if not placed:
+                            if best_taxi is not None:
+                                best_taxi['indices'].extend(chunk)
+                                best_taxi['drop_postals'].add(drop_postal)
+                            else:
                                 taxis.append({
                                     'indices': list(chunk),
                                     'drop_postals': {drop_postal}
