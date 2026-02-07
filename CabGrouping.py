@@ -4,11 +4,11 @@ import folium
 from folium.plugins import MarkerCluster
 import streamlit.components.v1 as components
 import math
-from sklearn.cluster import DBSCAN
+from sklearn.cluster import KMeans
 import numpy as np
 from geopy.distance import geodesic
 
-__version__ = "v0.0.0.3"
+__version__ = "v0.0.0.4"
 
 if 'max_distance' not in st.session_state:
     st.session_state.max_distance = 0
@@ -89,9 +89,9 @@ if run_button:
                 df = df.sort_values(by='DistanceFromCentroid')
                 return df
 
-            def determine_clusters_needed(df, max_group_size):
-                num_clusters = max(math.ceil(len(df) / max_group_size), 1)
-                return num_clusters
+            def determine_clusters_needed(total_items, max_group_size, max_groups):
+                num_clusters = max(math.ceil(total_items / max_group_size), 1)
+                return min(num_clusters, max_groups)
 
             def normalize_postal(code):
                 if pd.isna(code):
@@ -123,26 +123,24 @@ if run_button:
                 km_per_deg_lon = 111.320 * math.cos(math.radians(ref_lat))
                 return lon * km_per_deg_lon, lat * km_per_deg_lat
 
-            def cluster_postal_groups(postal_groups, eps_km=1.5, min_samples=2):
-                if not postal_groups:
+            def cluster_dropoff_groups_kmeans(dropoff_groups, max_group_size=4):
+                if not dropoff_groups:
                     return {}
-                if len(postal_groups) == 1:
-                    return {0: postal_groups}
-                ref_lat = np.mean([g['pick_lat'] for g in postal_groups] + [g['drop_lat'] for g in postal_groups])
+                if len(dropoff_groups) == 1:
+                    return {0: dropoff_groups}
+                total_items = sum(g['size'] for g in dropoff_groups)
+                n_clusters = determine_clusters_needed(total_items, max_group_size, len(dropoff_groups))
+                ref_lat = np.mean([g['pick_lat'] for g in dropoff_groups] + [g['drop_lat'] for g in dropoff_groups])
                 coords = []
-                for g in postal_groups:
+                for g in dropoff_groups:
                     px, py = latlon_to_km(g['pick_lat'], g['pick_lon'], ref_lat)
                     dx, dy = latlon_to_km(g['drop_lat'], g['drop_lon'], ref_lat)
                     coords.append([px, py, dx, dy])
                 coords = np.array(coords)
-                db = DBSCAN(eps=eps_km, min_samples=min_samples, metric='euclidean').fit(coords)
-                labels = db.labels_
+                kmeans = KMeans(n_clusters=n_clusters, n_init=10, random_state=0).fit(coords)
+                labels = kmeans.labels_
                 clustered = {}
-                next_cluster = max(labels) + 1 if labels.size > 0 else 0
-                for g, label in zip(postal_groups, labels):
-                    if label == -1:
-                        label = next_cluster
-                        next_cluster += 1
+                for g, label in zip(dropoff_groups, labels):
                     clustered.setdefault(label, []).append(g)
                 return clustered
 
@@ -192,7 +190,7 @@ if run_button:
             dropoff_df['DropOffPostalNorm'] = dropoff_df['DropOffPostal'].apply(normalize_postal)
 
             dropoff_groups = build_dropoff_groups(dropoff_df)
-            clustered_groups = cluster_postal_groups(dropoff_groups, eps_km=1.5, min_samples=2)
+            clustered_groups = cluster_dropoff_groups_kmeans(dropoff_groups, max_group_size=4)
 
             assignments, _ = pack_into_taxis(
                 clustered_groups,
