@@ -7,12 +7,15 @@ import math
 from sklearn.cluster import KMeans
 from geopy.distance import geodesic
 
+__version__ = "v0.0.0.8"
+
 if 'max_distance' not in st.session_state:
     st.session_state.max_distance = 0
 
 st.set_page_config(layout="wide")
 
 st.markdown("<h1 style='text-align: center;'>Taxi Grouping Optimization</h1>", unsafe_allow_html=True)
+st.caption(f"Version {__version__}")
 
 with st.sidebar:
     st.header("Upload Master File")
@@ -134,6 +137,90 @@ if run_button:
 
                 return adjusted_df
 
+            def post_optimize_groups(df, max_unique_postals=4, max_group_size=4):
+                df = df.copy()
+
+                def refresh_group(group):
+                    if not group['indices']:
+                        group['pickups'] = set()
+                        group['dropoffs'] = set()
+                        group['postals'] = set()
+                        return
+                    sub = df.loc[group['indices']]
+                    group['pickups'] = set(sub['PickUpPostal'])
+                    group['dropoffs'] = set(sub['DropOffPostal'])
+                    group['postals'] = group['pickups'].union(group['dropoffs'])
+
+                def build_groups():
+                    groups = {}
+                    for taxi, g in df.groupby('TaxiGroup'):
+                        groups[taxi] = {
+                            'indices': g.index.tolist(),
+                            'pickups': set(g['PickUpPostal']),
+                            'dropoffs': set(g['DropOffPostal']),
+                            'postals': set(g['PickUpPostal']).union(set(g['DropOffPostal']))
+                        }
+                    return groups
+
+                changed = True
+                while changed:
+                    changed = False
+                    taxi_groups = build_groups()
+                    donors = sorted(taxi_groups.items(), key=lambda kv: len(kv[1]['indices']))
+
+                    for donor_name, donor in donors:
+                        if donor_name not in taxi_groups:
+                            continue
+                        for idx in list(donor['indices']):
+                            row = df.loc[idx]
+                            best_taxi = None
+                            best_score = None
+
+                            for target_name, target in taxi_groups.items():
+                                if target_name == donor_name:
+                                    continue
+                                if len(target['indices']) >= max_group_size:
+                                    continue
+
+                                score = 0
+                                if row['PickUpPostal'] in target['pickups']:
+                                    score += 1
+                                if row['DropOffPostal'] in target['dropoffs']:
+                                    score += 1
+                                if score == 0:
+                                    continue
+
+                                new_postals = target['postals'].union([row['PickUpPostal'], row['DropOffPostal']])
+                                if len(new_postals) > max_unique_postals:
+                                    continue
+
+                                capacity_left = max_group_size - len(target['indices'])
+                                metric = (-score, capacity_left)
+                                if best_score is None or metric < best_score:
+                                    best_score = metric
+                                    best_taxi = target_name
+
+                            if best_taxi is not None:
+                                df.at[idx, 'TaxiGroup'] = best_taxi
+                                # Update donor and target in-place for current loop
+                                donor['indices'].remove(idx)
+                                taxi_groups[best_taxi]['indices'].append(idx)
+                                refresh_group(donor)
+                                refresh_group(taxi_groups[best_taxi])
+                                changed = True
+
+                # Renumber taxis to keep labels tidy
+                def taxi_sort_key(name):
+                    try:
+                        return int(str(name).split()[-1])
+                    except Exception:
+                        return 10**9
+
+                ordered = sorted(df['TaxiGroup'].unique(), key=taxi_sort_key)
+                mapping = {old: f'Taxi {i}' for i, old in enumerate(ordered, start=1)}
+                df['TaxiGroup'] = df['TaxiGroup'].map(mapping)
+                return df
+
             centroid = calculate_centroid(dropoff_df)
 
             dropoff_df = sort_by_distance_from_centroid(dropoff_df, centroid)
@@ -142,7 +229,9 @@ if run_button:
 
             dropoff_df, kmeans = cluster_passengers(dropoff_df, num_clusters)
 
-            dropoff_df = adjust_groups(dropoff_df, max_unique_postals=4, max_group_size=4)
+            max_unique_postals = 8
+            dropoff_df = adjust_groups(dropoff_df, max_unique_postals=max_unique_postals, max_group_size=4)
+            dropoff_df = post_optimize_groups(dropoff_df, max_unique_postals=max_unique_postals, max_group_size=4)
 
             output_excel_file_path = 'Taxi_Grouped_Data.xlsx'
             dropoff_df.to_excel(output_excel_file_path, index=False)
