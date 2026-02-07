@@ -7,7 +7,7 @@ import math
 from sklearn.cluster import KMeans
 from geopy.distance import geodesic
 
-__version__ = "v0.0.1.1"
+__version__ = "v0.0.1.2"
 
 if 'max_distance' not in st.session_state:
     st.session_state.max_distance = 0
@@ -195,6 +195,80 @@ if run_button:
                 df['TaxiGroup'] = df.index.map(assignments.get)
                 return df, taxi_counter
 
+            def mix_nearby_sectors(df, max_group_size=4, speed_kmh=80, max_travel_minutes=45):
+                df = df.copy()
+
+                def build_taxi_groups():
+                    groups = {}
+                    for taxi, g in df.groupby('TaxiGroup'):
+                        centroid = (g['DropOff_Latitude'].mean(), g['DropOff_Longitude'].mean())
+                        dropoff_groups = []
+                        for dropoff, dg in g.groupby('DropOffPostal'):
+                            dropoff_groups.append({
+                                'dropoff': dropoff,
+                                'indices': dg.index.tolist(),
+                                'size': len(dg),
+                                'lat': dg['DropOff_Latitude'].mean(),
+                                'lon': dg['DropOff_Longitude'].mean()
+                            })
+                        groups[taxi] = {
+                            'indices': g.index.tolist(),
+                            'centroid': centroid,
+                            'dropoff_groups': dropoff_groups
+                        }
+                    return groups
+
+                changed = True
+                while changed:
+                    changed = False
+                    taxi_groups = build_taxi_groups()
+                    donors = sorted(taxi_groups.items(), key=lambda kv: len(kv[1]['indices']))
+
+                    for donor_name, donor in donors:
+                        if donor_name not in taxi_groups:
+                            continue
+                        for group in donor['dropoff_groups']:
+                            best_target = None
+                            best_score = None
+
+                            for target_name, target in taxi_groups.items():
+                                if target_name == donor_name:
+                                    continue
+                                capacity_left = max_group_size - len(target['indices'])
+                                if group['size'] > capacity_left:
+                                    continue
+                                dist_km = calculate_distance(
+                                    (group['lat'], group['lon']),
+                                    target['centroid']
+                                )
+                                travel_minutes = (dist_km / speed_kmh) * 60
+                                if travel_minutes > max_travel_minutes:
+                                    continue
+                                score = capacity_left - group['size']
+                                if best_score is None or score < best_score:
+                                    best_score = score
+                                    best_target = target_name
+
+                            if best_target is not None:
+                                df.loc[group['indices'], 'TaxiGroup'] = best_target
+                                changed = True
+                                break
+
+                        if changed:
+                            break
+
+                # Renumber taxis to keep labels tidy
+                def taxi_sort_key(name):
+                    try:
+                        return int(str(name).split()[-1])
+                    except Exception:
+                        return 10**9
+
+                ordered = sorted(df['TaxiGroup'].unique(), key=taxi_sort_key)
+                mapping = {old: f'Taxi {i}' for i, old in enumerate(ordered, start=1)}
+                df['TaxiGroup'] = df['TaxiGroup'].map(mapping)
+                return df
+
             # Sector-based grouping: keep drop-offs within the same postal sector together.
             dropoff_df['DropOffPostalNorm'] = dropoff_df['DropOffPostal'].apply(normalize_postal)
             dropoff_df['DropOffSector'] = dropoff_df['DropOffPostalNorm'].apply(
@@ -212,6 +286,7 @@ if run_button:
                 grouped_results.append(sector_df)
 
             dropoff_df = pd.concat(grouped_results, ignore_index=False).sort_index()
+            dropoff_df = mix_nearby_sectors(dropoff_df, max_group_size=4, speed_kmh=80, max_travel_minutes=45)
 
             output_excel_file_path = 'Taxi_Grouped_Data.xlsx'
             dropoff_df.to_excel(output_excel_file_path, index=False)
