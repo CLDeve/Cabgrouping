@@ -8,7 +8,7 @@ from sklearn.cluster import KMeans
 import numpy as np
 from geopy.distance import geodesic
 
-__version__ = "v0.0.0.5"
+__version__ = "v0.0.0.6"
 
 if 'max_distance' not in st.session_state:
     st.session_state.max_distance = 0
@@ -147,9 +147,9 @@ if run_button:
             def pack_into_taxis(cluster_groups, max_group_size=4, max_unique_dropoffs=4, start_counter=1):
                 taxi_group_counter = start_counter
                 assignments = {}
+                taxis = []
 
                 for _, groups in cluster_groups.items():
-                    taxis = []
                     # Prioritize larger postal groups so they stay together when possible.
                     groups_sorted = sorted(groups, key=lambda x: x['size'], reverse=True)
 
