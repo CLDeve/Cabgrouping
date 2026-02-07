@@ -4,8 +4,11 @@ import folium
 from folium.plugins import MarkerCluster
 import streamlit.components.v1 as components
 import math
-from sklearn.cluster import KMeans
+from sklearn.cluster import DBSCAN
+import numpy as np
 from geopy.distance import geodesic
+
+__version__ = "v0.0.0.2"
 
 if 'max_distance' not in st.session_state:
     st.session_state.max_distance = 0
@@ -39,9 +42,9 @@ if run_button:
         # Update the status to show "Processing..."
         status_placeholder.text("Processing...")
 
-        master_df = pd.read_excel(master_file)
+        master_df = pd.read_excel(master_file, dtype={'PostalCode': str})
 
-        upload_df = pd.read_excel(upload_file)
+        upload_df = pd.read_excel(upload_file, dtype={'PickUpPostal': str, 'DropOffPostal': str})
 
         if 'StaffID' in upload_df.columns:
             upload_df = upload_df.drop_duplicates(subset=['StaffID'], keep='first')
@@ -89,78 +92,105 @@ if run_button:
                 num_clusters = max(math.ceil(len(df) / max_group_size), 1)
                 return num_clusters
 
-            def cluster_passengers(df, n_clusters):
-                combined_coords = df[['PickUp_Latitude', 'PickUp_Longitude', 'DropOff_Latitude', 'DropOff_Longitude']].copy()
-                kmeans = KMeans(n_clusters=n_clusters, n_init=10, random_state=0).fit(combined_coords)
-                df['Cluster'] = kmeans.labels_
-                return df, kmeans
+            def normalize_postal(code):
+                if pd.isna(code):
+                    return None
+                digits = ''.join(ch for ch in str(code).strip() if ch.isdigit())
+                if len(digits) < 2:
+                    return None
+                if len(digits) <= 6:
+                    return digits.zfill(6)
+                return digits[:6]
 
-            def adjust_groups(df, max_unique_postals=4, max_group_size=4):
-                adjusted_df = pd.DataFrame(columns=df.columns)
-                adjusted_df['TaxiGroup'] = ''  # Initialize the 'TaxiGroup' column with empty strings
+            def build_postal_groups(df):
+                groups = []
+                for postal, g in df.groupby('PickUpPostalNorm'):
+                    groups.append({
+                        'postal': postal,
+                        'lat': g['PickUp_Latitude'].mean(),
+                        'lon': g['PickUp_Longitude'].mean(),
+                        'indices': g.index.tolist(),
+                        'size': len(g)
+                    })
+                return groups
 
-                taxi_group_counter = 1
+            def cluster_postal_groups(postal_groups, eps_km=1.5, min_samples=2):
+                if not postal_groups:
+                    return {}
+                coords = np.radians([[g['lat'], g['lon']] for g in postal_groups])
+                if len(coords) == 1:
+                    return {0: postal_groups}
+                db = DBSCAN(
+                    eps=eps_km / 6371.0,
+                    min_samples=min_samples,
+                    metric='haversine'
+                ).fit(coords)
+                labels = db.labels_
+                clustered = {}
+                next_cluster = max(labels) + 1 if labels.size > 0 else 0
+                for g, label in zip(postal_groups, labels):
+                    if label == -1:
+                        label = next_cluster
+                        next_cluster += 1
+                    clustered.setdefault(label, []).append(g)
+                return clustered
 
-                for cluster in df['Cluster'].unique():
-                    cluster_df = df[df['Cluster'] == cluster].copy()
+            def pack_into_taxis(cluster_groups, max_group_size=4, max_unique_postals=4, start_counter=1):
+                taxi_group_counter = start_counter
+                assignments = {}
 
-                    cluster_df['Distance'] = cluster_df.apply(
-                        lambda row: calculate_distance(
-                            (row['PickUp_Latitude'], row['PickUp_Longitude']),
-                            (row['DropOff_Latitude'], row['DropOff_Longitude'])
-                        ), axis=1)
-                    cluster_df = cluster_df.sort_values(by='Distance')
+                for _, groups in cluster_groups.items():
+                    taxis = []
+                    # Prioritize larger postal groups so they stay together when possible.
+                    groups_sorted = sorted(groups, key=lambda x: x['size'], reverse=True)
 
-                    group_list = []
-                    while len(cluster_df) > 0:
-                        group = pd.DataFrame()
-                        unique_postals = set()
-                        group_size = 0
+                    for g in groups_sorted:
+                        postal = g['postal']
+                        indices = g['indices']
 
-                        for i, row in cluster_df.iterrows():
-                            potential_postals = unique_postals.union([row['PickUpPostal'], row['DropOffPostal']])
+                        # Split only if the same postal exceeds capacity.
+                        chunks = [indices[i:i + max_group_size] for i in range(0, len(indices), max_group_size)]
 
-                            if len(potential_postals) > max_unique_postals or group_size >= max_group_size:
+                        for chunk in chunks:
+                            placed = False
+                            for taxi in taxis:
+                                capacity_left = max_group_size - len(taxi['indices'])
+                                if len(chunk) > capacity_left:
+                                    continue
+                                if postal not in taxi['postals'] and len(taxi['postals']) >= max_unique_postals:
+                                    continue
+                                taxi['indices'].extend(chunk)
+                                taxi['postals'].add(postal)
+                                placed = True
                                 break
 
-                            unique_postals = potential_postals
-                            group = pd.concat([group, pd.DataFrame([row])])
-                            group_size += 1
+                            if not placed:
+                                taxis.append({
+                                    'indices': list(chunk),
+                                    'postals': {postal}
+                                })
 
-                        group_list.append(group)
-                        cluster_df = cluster_df.drop(group.index)
-
-                    # Reallocate if there's only 1 person in a group
-                    if len(group_list) > 1 and len(group_list[-1]) == 1:
-                        # Merge last two groups together and split evenly
-                        merged_group = pd.concat([group_list[-2], group_list[-1]], ignore_index=True)
-                        group_list = group_list[:-2]  # Remove last two groups
-
-                        # Split evenly between two groups
-                        split_point = len(merged_group) // 2
-                        group_1 = merged_group.iloc[:split_point]
-                        group_2 = merged_group.iloc[split_point:]
-
-                        group_list.append(group_1)
-                        group_list.append(group_2)
-
-                    # Assign taxi groups
-                    for group in group_list:
-                        group['TaxiGroup'] = f'Taxi {taxi_group_counter}'
-                        adjusted_df = pd.concat([adjusted_df, group], ignore_index=True)
+                    for taxi in taxis:
+                        taxi_label = f'Taxi {taxi_group_counter}'
+                        for idx in taxi['indices']:
+                            assignments[idx] = taxi_label
                         taxi_group_counter += 1
 
-                return adjusted_df
+                return assignments, taxi_group_counter
 
-            centroid = calculate_centroid(dropoff_df)
+            dropoff_df['PickUpPostalNorm'] = dropoff_df['PickUpPostal'].apply(normalize_postal)
 
-            dropoff_df = sort_by_distance_from_centroid(dropoff_df, centroid)
+            postal_groups = build_postal_groups(dropoff_df)
+            clustered_groups = cluster_postal_groups(postal_groups, eps_km=1.5, min_samples=2)
 
-            num_clusters = determine_clusters_needed(dropoff_df, max_group_size=4)
+            assignments, _ = pack_into_taxis(
+                clustered_groups,
+                max_unique_postals=4,
+                max_group_size=4,
+                start_counter=1
+            )
 
-            dropoff_df, kmeans = cluster_passengers(dropoff_df, num_clusters)
-
-            dropoff_df = adjust_groups(dropoff_df, max_unique_postals=4, max_group_size=4)
+            dropoff_df['TaxiGroup'] = dropoff_df.index.map(assignments.get)
 
             output_excel_file_path = 'Taxi_Grouped_Data.xlsx'
             dropoff_df.to_excel(output_excel_file_path, index=False)
@@ -188,7 +218,6 @@ if run_button:
                         icon=folium.Icon(color='red', icon='home')
                     ).add_to(m)
 
-                    # Add drop-off marker
                     folium.Marker(
                         location=[row['DropOff_Latitude'], row['DropOff_Longitude']],
                         popup=f"Drop-Off: {row['DropOffPostal']} | Group: {row['TaxiGroup']}",
