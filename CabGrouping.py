@@ -110,22 +110,32 @@ if run_button:
                         'postal': postal,
                         'lat': g['PickUp_Latitude'].mean(),
                         'lon': g['PickUp_Longitude'].mean(),
+                        'drop_lat': g['DropOff_Latitude'].mean(),
+                        'drop_lon': g['DropOff_Longitude'].mean(),
                         'indices': g.index.tolist(),
                         'size': len(g)
                     })
                 return groups
 
+            def latlon_to_km(lat, lon, ref_lat):
+                # Approximate conversion to km for small geographic areas.
+                km_per_deg_lat = 110.574
+                km_per_deg_lon = 111.320 * math.cos(math.radians(ref_lat))
+                return lon * km_per_deg_lon, lat * km_per_deg_lat
+
             def cluster_postal_groups(postal_groups, eps_km=1.5, min_samples=2):
                 if not postal_groups:
                     return {}
-                coords = np.radians([[g['lat'], g['lon']] for g in postal_groups])
-                if len(coords) == 1:
+                if len(postal_groups) == 1:
                     return {0: postal_groups}
-                db = DBSCAN(
-                    eps=eps_km / 6371.0,
-                    min_samples=min_samples,
-                    metric='haversine'
-                ).fit(coords)
+                ref_lat = np.mean([g['lat'] for g in postal_groups] + [g['drop_lat'] for g in postal_groups])
+                coords = []
+                for g in postal_groups:
+                    px, py = latlon_to_km(g['lat'], g['lon'], ref_lat)
+                    dx, dy = latlon_to_km(g['drop_lat'], g['drop_lon'], ref_lat)
+                    coords.append([px, py, dx, dy])
+                coords = np.array(coords)
+                db = DBSCAN(eps=eps_km, min_samples=min_samples, metric='euclidean').fit(coords)
                 labels = db.labels_
                 clustered = {}
                 next_cluster = max(labels) + 1 if labels.size > 0 else 0
