@@ -7,7 +7,7 @@ import math
 from sklearn.cluster import KMeans
 from geopy.distance import geodesic
 
-__version__ = "v0.0.1.0"
+__version__ = "v0.0.1.1"
 
 if 'max_distance' not in st.session_state:
     st.session_state.max_distance = 0
@@ -137,7 +137,17 @@ if run_button:
 
                 return adjusted_df
 
-            def assign_groups_dropoff_first(df, max_group_size=4):
+            def normalize_postal(code):
+                if pd.isna(code):
+                    return None
+                digits = ''.join(ch for ch in str(code).strip() if ch.isdigit())
+                if len(digits) < 2:
+                    return None
+                if len(digits) <= 6:
+                    return digits.zfill(6)
+                return digits[:6]
+
+            def assign_groups_dropoff_first(df, max_group_size=4, start_counter=1):
                 # Keep the same drop-off together (split only if > max_group_size).
                 centroid = (df['DropOff_Latitude'].mean(), df['DropOff_Longitude'].mean())
                 dropoff_groups = []
@@ -176,14 +186,32 @@ if run_button:
                             best_taxi['indices'].extend(chunk)
 
                 assignments = {}
-                for i, taxi in enumerate(taxis, start=1):
+                taxi_counter = start_counter
+                for taxi in taxis:
                     for idx in taxi['indices']:
-                        assignments[idx] = f'Taxi {i}'
+                        assignments[idx] = f'Taxi {taxi_counter}'
+                    taxi_counter += 1
 
                 df['TaxiGroup'] = df.index.map(assignments.get)
-                return df
+                return df, taxi_counter
 
-            dropoff_df = assign_groups_dropoff_first(dropoff_df, max_group_size=4)
+            # Sector-based grouping: keep drop-offs within the same postal sector together.
+            dropoff_df['DropOffPostalNorm'] = dropoff_df['DropOffPostal'].apply(normalize_postal)
+            dropoff_df['DropOffSector'] = dropoff_df['DropOffPostalNorm'].apply(
+                lambda x: int(x[:2]) if x else None
+            )
+
+            grouped_results = []
+            taxi_counter = 1
+            for _, sector_df in dropoff_df.groupby('DropOffSector', dropna=False):
+                sector_df, taxi_counter = assign_groups_dropoff_first(
+                    sector_df,
+                    max_group_size=4,
+                    start_counter=taxi_counter
+                )
+                grouped_results.append(sector_df)
+
+            dropoff_df = pd.concat(grouped_results, ignore_index=False).sort_index()
 
             output_excel_file_path = 'Taxi_Grouped_Data.xlsx'
             dropoff_df.to_excel(output_excel_file_path, index=False)
