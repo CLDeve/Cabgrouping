@@ -7,12 +7,15 @@ import math
 from sklearn.cluster import KMeans
 from geopy.distance import geodesic
 
+__version__ = "v0.0.1.4"
+
 if 'max_distance' not in st.session_state:
     st.session_state.max_distance = 0
 
 st.set_page_config(layout="wide")
 
 st.markdown("<h1 style='text-align: center;'>Taxi Grouping Optimization</h1>", unsafe_allow_html=True)
+st.caption(f"Version {__version__}")
 
 with st.sidebar:
     st.header("Upload Master File")
@@ -95,6 +98,16 @@ if run_button:
                 df['Cluster'] = kmeans.labels_
                 return df, kmeans
 
+            def get_sector(code):
+                if pd.isna(code):
+                    return None
+                digits = ''.join(ch for ch in str(code).strip() if ch.isdigit())
+                if len(digits) < 2:
+                    return None
+                if len(digits) <= 6:
+                    digits = digits.zfill(6)
+                return digits[:2]
+
             def adjust_groups(df, max_unique_postals=4, max_group_size=4):
                 adjusted_df = pd.DataFrame(columns=df.columns)
                 adjusted_df['TaxiGroup'] = ''  # Initialize the 'TaxiGroup' column with empty strings
@@ -111,29 +124,140 @@ if run_button:
                     cluster_df = cluster_df.sort_values(by='Distance')
 
                     while len(cluster_df) > 0:
-                        group = pd.DataFrame()
+                        group_rows = []
                         unique_postals = set()
                         group_size = 0
+                        group_sectors = set()
 
-                        for i, row in cluster_df.iterrows():
-                            potential_postals = unique_postals.union([row['PickUpPostal'], row['DropOffPostal']])
+                        while group_size < max_group_size and len(cluster_df) > 0:
+                            if group_size == 0:
+                                candidates = cluster_df.index.tolist()
+                            else:
+                                same_sector = cluster_df[cluster_df['DropOffSector'].isin(group_sectors)]
+                                other_sector = cluster_df[~cluster_df['DropOffSector'].isin(group_sectors)]
+                                candidates = list(same_sector.index) + list(other_sector.index)
 
-                            if len(potential_postals) > max_unique_postals or group_size >= max_group_size:
+                            added = False
+                            for idx in candidates:
+                                row = cluster_df.loc[idx]
+                                potential_postals = unique_postals.union([row['PickUpPostal'], row['DropOffPostal']])
+                                if len(potential_postals) > max_unique_postals:
+                                    continue
+                                unique_postals = potential_postals
+                                group_rows.append(row)
+                                group_size += 1
+                                group_sectors.add(row['DropOffSector'])
+                                cluster_df = cluster_df.drop(idx)
+                                added = True
                                 break
 
-                            unique_postals = potential_postals
-                            group = pd.concat([group, pd.DataFrame([row])])
-                            group_size += 1
+                            if not added:
+                                break
 
+                        group = pd.DataFrame(group_rows)
                         group['TaxiGroup'] = f'Taxi {taxi_group_counter}'
                         adjusted_df = pd.concat([adjusted_df, group], ignore_index=True)
-
-                        cluster_df = cluster_df.drop(group.index)
 
                         taxi_group_counter += 1
 
                 return adjusted_df
 
+            def soft_merge_by_sector(df, max_group_size=4, max_unique_postals=4, max_distance_km=3):
+                def normalize_postal(code):
+                    if pd.isna(code):
+                        return None
+                    digits = ''.join(ch for ch in str(code).strip() if ch.isdigit())
+                    if len(digits) < 2:
+                        return None
+                    if len(digits) <= 6:
+                        return digits.zfill(6)
+                    return digits[:6]
+
+                def get_sector(code):
+                    postal = normalize_postal(code)
+                    return postal[:2] if postal else None
+
+                df = df.copy()
+                df['_DropOffSector'] = df['DropOffPostal'].apply(get_sector)
+
+                def build_taxis():
+                    taxis = {}
+                    for taxi, g in df.groupby('TaxiGroup'):
+                        taxis[taxi] = {
+                            'indices': g.index.tolist(),
+                            'sectors': set(g['_DropOffSector']),
+                            'postals': set(g['PickUpPostal']).union(set(g['DropOffPostal'])),
+                            'centroid': (g['DropOff_Latitude'].mean(), g['DropOff_Longitude'].mean())
+                        }
+                    return taxis
+
+                taxis = build_taxis()
+                donors = sorted(taxis.keys(), key=lambda t: len(taxis[t]['indices']))
+
+                for donor in donors:
+                    if donor not in taxis:
+                        continue
+                    donor_indices = list(taxis[donor]['indices'])
+
+                    temp_taxis = {}
+                    for t, info in taxis.items():
+                        if t == donor:
+                            continue
+                        temp_taxis[t] = {
+                            'indices': list(info['indices']),
+                            'sectors': set(info['sectors']),
+                            'postals': set(info['postals']),
+                            'centroid': info['centroid']
+                        }
+
+                    assign_map = {}
+                    success = True
+
+                    for idx in donor_indices:
+                        row = df.loc[idx]
+                        row_sector = row['_DropOffSector']
+                        row_postals = {row['PickUpPostal'], row['DropOffPostal']}
+                        row_point = (row['DropOff_Latitude'], row['DropOff_Longitude'])
+
+                        candidates = []
+                        for t, info in temp_taxis.items():
+                            if len(info['indices']) >= max_group_size:
+                                continue
+                            if calculate_distance(row_point, info['centroid']) > max_distance_km:
+                                continue
+                            new_postals = info['postals'].union(row_postals)
+                            if len(new_postals) > max_unique_postals:
+                                continue
+                            same_sector = row_sector in info['sectors']
+                            capacity_left = max_group_size - len(info['indices'])
+                            score = (0 if same_sector else 1, capacity_left)
+                            candidates.append((score, t))
+
+                        if not candidates:
+                            success = False
+                            break
+
+                        candidates.sort()
+                        target = candidates[0][1]
+                        info = temp_taxis[target]
+                        info['indices'].append(idx)
+                        info['sectors'].add(row_sector)
+                        info['postals'].update(row_postals)
+                        info['centroid'] = (
+                            df.loc[info['indices']]['DropOff_Latitude'].mean(),
+                            df.loc[info['indices']]['DropOff_Longitude'].mean()
+                        )
+                        assign_map[idx] = target
+
+                    if success:
+                        for idx, target in assign_map.items():
+                            df.at[idx, 'TaxiGroup'] = target
+                        taxis = build_taxis()
+
+                df.drop(columns=['_DropOffSector'], inplace=True)
+                return df
+
+            dropoff_df['DropOffSector'] = dropoff_df['DropOffPostal'].apply(get_sector)
             centroid = calculate_centroid(dropoff_df)
 
             dropoff_df = sort_by_distance_from_centroid(dropoff_df, centroid)
@@ -143,6 +267,7 @@ if run_button:
             dropoff_df, kmeans = cluster_passengers(dropoff_df, num_clusters)
 
             dropoff_df = adjust_groups(dropoff_df, max_unique_postals=4, max_group_size=4)
+            dropoff_df = soft_merge_by_sector(dropoff_df, max_group_size=4, max_unique_postals=4, max_distance_km=3)
 
             output_excel_file_path = 'Taxi_Grouped_Data.xlsx'
             dropoff_df.to_excel(output_excel_file_path, index=False)
