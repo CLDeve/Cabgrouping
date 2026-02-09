@@ -7,7 +7,7 @@ import math
 from sklearn.cluster import KMeans
 from geopy.distance import geodesic
 
-__version__ = "v0.0.1.3"
+__version__ = "v0.0.1.4"
 
 if 'max_distance' not in st.session_state:
     st.session_state.max_distance = 0
@@ -187,6 +187,120 @@ if run_button:
 
                 return taxis
 
+            def order_taxis_by_centroid_kmeans(taxis, df):
+                if len(taxis) <= 1:
+                    return taxis
+
+                centroid_rows = []
+                for i, taxi in enumerate(taxis):
+                    sub = df.loc[taxi['indices']]
+                    centroid_rows.append({
+                        'idx': i,
+                        'lat': sub['DropOff_Latitude'].mean(),
+                        'lon': sub['DropOff_Longitude'].mean()
+                    })
+
+                centroid_df = pd.DataFrame(centroid_rows)
+                n_clusters = min(len(centroid_df), max(1, math.ceil(len(centroid_df) / 4)))
+                if n_clusters > 1:
+                    kmeans = KMeans(n_clusters=n_clusters, n_init=10, random_state=0).fit(
+                        centroid_df[['lat', 'lon']]
+                    )
+                    centroid_df['Cluster'] = kmeans.labels_
+                    cluster_centroids = centroid_df.groupby('Cluster')[['lat', 'lon']].mean()
+                    centroid_df = centroid_df.join(cluster_centroids, on='Cluster', rsuffix='_c')
+                    centroid_df['DistToCluster'] = centroid_df.apply(
+                        lambda r: calculate_distance((r['lat'], r['lon']), (r['lat_c'], r['lon_c'])),
+                        axis=1
+                    )
+                    centroid_df = centroid_df.sort_values(by=['Cluster', 'DistToCluster'])
+                else:
+                    sector_centroid = (centroid_df['lat'].mean(), centroid_df['lon'].mean())
+                    centroid_df['DistToSector'] = centroid_df.apply(
+                        lambda r: calculate_distance((r['lat'], r['lon']), sector_centroid),
+                        axis=1
+                    )
+                    centroid_df = centroid_df.sort_values(by='DistToSector')
+
+                ordered = []
+                for i in centroid_df['idx'].tolist():
+                    ordered.append(taxis[i])
+                return ordered
+
+            def mix_nearby_sectors(df, max_group_size=4, speed_kmh=80, max_travel_minutes=45):
+                df = df.copy()
+
+                def build_taxi_groups():
+                    groups = {}
+                    for taxi, g in df.groupby('TaxiGroup'):
+                        centroid = (g['DropOff_Latitude'].mean(), g['DropOff_Longitude'].mean())
+                        dropoff_groups = []
+                        for dropoff, dg in g.groupby('DropOffPostal'):
+                            dropoff_groups.append({
+                                'dropoff': dropoff,
+                                'indices': dg.index.tolist(),
+                                'size': len(dg),
+                                'lat': dg['DropOff_Latitude'].mean(),
+                                'lon': dg['DropOff_Longitude'].mean()
+                            })
+                        groups[taxi] = {
+                            'indices': g.index.tolist(),
+                            'centroid': centroid,
+                            'dropoff_groups': dropoff_groups
+                        }
+                    return groups
+
+                changed = True
+                while changed:
+                    changed = False
+                    taxi_groups = build_taxi_groups()
+                    donors = sorted(taxi_groups.items(), key=lambda kv: len(kv[1]['indices']))
+
+                    for donor_name, donor in donors:
+                        if donor_name not in taxi_groups:
+                            continue
+                        for group in donor['dropoff_groups']:
+                            best_target = None
+                            best_score = None
+
+                            for target_name, target in taxi_groups.items():
+                                if target_name == donor_name:
+                                    continue
+                                capacity_left = max_group_size - len(target['indices'])
+                                if group['size'] > capacity_left:
+                                    continue
+                                dist_km = calculate_distance(
+                                    (group['lat'], group['lon']),
+                                    target['centroid']
+                                )
+                                travel_minutes = (dist_km / speed_kmh) * 60
+                                if travel_minutes > max_travel_minutes:
+                                    continue
+                                score = capacity_left - group['size']
+                                if best_score is None or score < best_score:
+                                    best_score = score
+                                    best_target = target_name
+
+                            if best_target is not None:
+                                df.loc[group['indices'], 'TaxiGroup'] = best_target
+                                changed = True
+                                break
+
+                        if changed:
+                            break
+
+                # Renumber taxis to keep labels tidy
+                def taxi_sort_key(name):
+                    try:
+                        return int(str(name).split()[-1])
+                    except Exception:
+                        return 10**9
+
+                ordered = sorted(df['TaxiGroup'].unique(), key=taxi_sort_key)
+                mapping = {old: f'Taxi {i}' for i, old in enumerate(ordered, start=1)}
+                df['TaxiGroup'] = df['TaxiGroup'].map(mapping)
+                return df
+
             dropoff_df['DropOffPostalNorm'] = dropoff_df['DropOffPostal'].apply(normalize_postal)
             dropoff_df['DropOffSector'] = dropoff_df['DropOffPostalNorm'].apply(
                 lambda x: x[:2] if x else None
@@ -195,61 +309,23 @@ if run_button:
             grouped_results = []
             taxi_counter = 1
             for _, sector_df in dropoff_df.groupby('DropOffSector', dropna=False):
-                centroid = calculate_centroid(sector_df)
-                sector_df = sort_by_distance_from_centroid(sector_df, centroid)
+                taxis = assign_groups_dropoff_first(sector_df, max_group_size=4)
+                taxis = order_taxis_by_centroid_kmeans(taxis, sector_df)
 
-                num_clusters = determine_clusters_needed(sector_df, max_group_size=4)
-                sector_df, _ = cluster_passengers(sector_df, num_clusters)
+                for taxi in taxis:
+                    for row_idx in taxi['indices']:
+                        sector_df.at[row_idx, 'TaxiGroup'] = f'Taxi {taxi_counter}'
+                    taxi_counter += 1
 
-                sector_results = []
-                for _, cluster_df in sector_df.groupby('Cluster'):
-                    taxis = assign_groups_dropoff_first(
-                        cluster_df,
-                        max_group_size=4
-                    )
-
-                    centroid_rows = []
-                    for i, taxi in enumerate(taxis):
-                        sub = cluster_df.loc[taxi['indices']]
-                        centroid_rows.append({
-                            'idx': i,
-                            'lat': sub['DropOff_Latitude'].mean(),
-                            'lon': sub['DropOff_Longitude'].mean()
-                        })
-
-                    centroid_df = pd.DataFrame(centroid_rows)
-                    if len(centroid_df) > 1:
-                        n_clusters = min(len(centroid_df), max(1, math.ceil(len(centroid_df) / 4)))
-                        if n_clusters > 1:
-                            kmeans = KMeans(n_clusters=n_clusters, n_init=10, random_state=0).fit(
-                                centroid_df[['lat', 'lon']]
-                            )
-                            centroid_df['Cluster'] = kmeans.labels_
-                            cluster_centroids = centroid_df.groupby('Cluster')[['lat', 'lon']].mean()
-                            centroid_df = centroid_df.join(cluster_centroids, on='Cluster', rsuffix='_c')
-                            centroid_df['DistToCluster'] = centroid_df.apply(
-                                lambda r: calculate_distance((r['lat'], r['lon']), (r['lat_c'], r['lon_c'])),
-                                axis=1
-                            )
-                            centroid_df = centroid_df.sort_values(by=['Cluster', 'DistToCluster'])
-                        else:
-                            sector_centroid = (centroid_df['lat'].mean(), centroid_df['lon'].mean())
-                            centroid_df['DistToSector'] = centroid_df.apply(
-                                lambda r: calculate_distance((r['lat'], r['lon']), sector_centroid),
-                                axis=1
-                            )
-                            centroid_df = centroid_df.sort_values(by='DistToSector')
-
-                    for i in centroid_df['idx'].tolist():
-                        for row_idx in taxis[i]['indices']:
-                            cluster_df.at[row_idx, 'TaxiGroup'] = f'Taxi {taxi_counter}'
-                        taxi_counter += 1
-
-                    sector_results.append(cluster_df)
-
-                grouped_results.append(pd.concat(sector_results, ignore_index=False))
+                grouped_results.append(sector_df)
 
             dropoff_df = pd.concat(grouped_results, ignore_index=True)
+            dropoff_df = mix_nearby_sectors(
+                dropoff_df,
+                max_group_size=4,
+                speed_kmh=80,
+                max_travel_minutes=45
+            )
 
             output_excel_file_path = 'Taxi_Grouped_Data.xlsx'
             dropoff_df.to_excel(output_excel_file_path, index=False)
