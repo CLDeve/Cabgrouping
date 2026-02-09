@@ -98,6 +98,16 @@ if run_button:
                 df['Cluster'] = kmeans.labels_
                 return df, kmeans
 
+            def get_sector(code):
+                if pd.isna(code):
+                    return None
+                digits = ''.join(ch for ch in str(code).strip() if ch.isdigit())
+                if len(digits) < 2:
+                    return None
+                if len(digits) <= 6:
+                    digits = digits.zfill(6)
+                return digits[:2]
+
             def adjust_groups(df, max_unique_postals=4, max_group_size=4):
                 adjusted_df = pd.DataFrame(columns=df.columns)
                 adjusted_df['TaxiGroup'] = ''  # Initialize the 'TaxiGroup' column with empty strings
@@ -114,24 +124,39 @@ if run_button:
                     cluster_df = cluster_df.sort_values(by='Distance')
 
                     while len(cluster_df) > 0:
-                        group = pd.DataFrame()
+                        group_rows = []
                         unique_postals = set()
                         group_size = 0
+                        group_sectors = set()
 
-                        for i, row in cluster_df.iterrows():
-                            potential_postals = unique_postals.union([row['PickUpPostal'], row['DropOffPostal']])
+                        while group_size < max_group_size and len(cluster_df) > 0:
+                            if group_size == 0:
+                                candidates = cluster_df.index.tolist()
+                            else:
+                                same_sector = cluster_df[cluster_df['DropOffSector'].isin(group_sectors)]
+                                other_sector = cluster_df[~cluster_df['DropOffSector'].isin(group_sectors)]
+                                candidates = list(same_sector.index) + list(other_sector.index)
 
-                            if len(potential_postals) > max_unique_postals or group_size >= max_group_size:
+                            added = False
+                            for idx in candidates:
+                                row = cluster_df.loc[idx]
+                                potential_postals = unique_postals.union([row['PickUpPostal'], row['DropOffPostal']])
+                                if len(potential_postals) > max_unique_postals:
+                                    continue
+                                unique_postals = potential_postals
+                                group_rows.append(row)
+                                group_size += 1
+                                group_sectors.add(row['DropOffSector'])
+                                cluster_df = cluster_df.drop(idx)
+                                added = True
                                 break
 
-                            unique_postals = potential_postals
-                            group = pd.concat([group, pd.DataFrame([row])])
-                            group_size += 1
+                            if not added:
+                                break
 
+                        group = pd.DataFrame(group_rows)
                         group['TaxiGroup'] = f'Taxi {taxi_group_counter}'
                         adjusted_df = pd.concat([adjusted_df, group], ignore_index=True)
-
-                        cluster_df = cluster_df.drop(group.index)
 
                         taxi_group_counter += 1
 
@@ -223,6 +248,7 @@ if run_button:
                 df.drop(columns=['_DropOffSector'], inplace=True)
                 return df
 
+            dropoff_df['DropOffSector'] = dropoff_df['DropOffPostal'].apply(get_sector)
             centroid = calculate_centroid(dropoff_df)
 
             dropoff_df = sort_by_distance_from_centroid(dropoff_df, centroid)
