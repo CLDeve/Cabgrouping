@@ -7,9 +7,7 @@ import math
 from sklearn.cluster import KMeans
 from geopy.distance import geodesic
 
-__version__ = "v0.0.1.3"
-
-__version__ = "v0.0.1.1"
+__version__ = "v0.0.1.4"
 
 if 'max_distance' not in st.session_state:
     st.session_state.max_distance = 0
@@ -17,7 +15,6 @@ if 'max_distance' not in st.session_state:
 st.set_page_config(layout="wide")
 
 st.markdown("<h1 style='text-align: center;'>Taxi Grouping Optimization</h1>", unsafe_allow_html=True)
-st.caption(f"Version {__version__}")
 st.caption(f"Version {__version__}")
 
 with st.sidebar:
