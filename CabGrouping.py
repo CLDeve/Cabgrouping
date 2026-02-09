@@ -7,6 +7,8 @@ import math
 from sklearn.cluster import KMeans
 from geopy.distance import geodesic
 
+__version__ = "v0.0.1.2"
+
 __version__ = "v0.0.1.1"
 
 if 'max_distance' not in st.session_state:
@@ -15,6 +17,7 @@ if 'max_distance' not in st.session_state:
 st.set_page_config(layout="wide")
 
 st.markdown("<h1 style='text-align: center;'>Taxi Grouping Optimization</h1>", unsafe_allow_html=True)
+st.caption(f"Version {__version__}")
 st.caption(f"Version {__version__}")
 
 with st.sidebar:
@@ -162,7 +165,7 @@ if run_button:
 
                 return adjusted_df
 
-            def soft_merge_by_sector(df, max_group_size=4, max_unique_postals=4):
+            def soft_merge_by_sector(df, max_group_size=4, max_unique_postals=4, max_distance_km=3):
                 def normalize_postal(code):
                     if pd.isna(code):
                         return None
@@ -186,7 +189,8 @@ if run_button:
                         taxis[taxi] = {
                             'indices': g.index.tolist(),
                             'sectors': set(g['_DropOffSector']),
-                            'postals': set(g['PickUpPostal']).union(set(g['DropOffPostal']))
+                            'postals': set(g['PickUpPostal']).union(set(g['DropOffPostal'])),
+                            'centroid': (g['DropOff_Latitude'].mean(), g['DropOff_Longitude'].mean())
                         }
                     return taxis
 
@@ -215,10 +219,13 @@ if run_button:
                         row = df.loc[idx]
                         row_sector = row['_DropOffSector']
                         row_postals = {row['PickUpPostal'], row['DropOffPostal']}
+                        row_point = (row['DropOff_Latitude'], row['DropOff_Longitude'])
 
                         candidates = []
                         for t, info in temp_taxis.items():
                             if len(info['indices']) >= max_group_size:
+                                continue
+                            if calculate_distance(row_point, info['centroid']) > max_distance_km:
                                 continue
                             new_postals = info['postals'].union(row_postals)
                             if len(new_postals) > max_unique_postals:
@@ -238,6 +245,10 @@ if run_button:
                         info['indices'].append(idx)
                         info['sectors'].add(row_sector)
                         info['postals'].update(row_postals)
+                        info['centroid'] = (
+                            df.loc[info['indices']]['DropOff_Latitude'].mean(),
+                            df.loc[info['indices']]['DropOff_Longitude'].mean()
+                        )
                         assign_map[idx] = target
 
                     if success:
@@ -258,7 +269,7 @@ if run_button:
             dropoff_df, kmeans = cluster_passengers(dropoff_df, num_clusters)
 
             dropoff_df = adjust_groups(dropoff_df, max_unique_postals=4, max_group_size=4)
-            dropoff_df = soft_merge_by_sector(dropoff_df, max_group_size=4, max_unique_postals=4)
+            dropoff_df = soft_merge_by_sector(dropoff_df, max_group_size=4, max_unique_postals=4, max_distance_km=3)
 
             output_excel_file_path = 'Taxi_Grouped_Data.xlsx'
             dropoff_df.to_excel(output_excel_file_path, index=False)
