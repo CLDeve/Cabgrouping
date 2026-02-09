@@ -7,7 +7,7 @@ import math
 from sklearn.cluster import KMeans
 from geopy.distance import geodesic
 
-__version__ = "v0.0.1.2"
+__version__ = "v0.0.1.3"
 
 __version__ = "v0.0.1.1"
 
@@ -209,7 +209,8 @@ if run_button:
                         temp_taxis[t] = {
                             'indices': list(info['indices']),
                             'sectors': set(info['sectors']),
-                            'postals': set(info['postals'])
+                            'postals': set(info['postals']),
+                            'centroid': info['centroid']
                         }
 
                     assign_map = {}
