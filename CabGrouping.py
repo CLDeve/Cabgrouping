@@ -3,11 +3,12 @@ import pandas as pd
 import folium
 from folium.plugins import MarkerCluster
 import streamlit.components.v1 as components
+import time
 import math
 from sklearn.cluster import KMeans
 from geopy.distance import geodesic
 
-__version__ = "v0.0.1.2"
+__version__ = "v0.0.1.3"
 
 if 'max_distance' not in st.session_state:
     st.session_state.max_distance = 0
@@ -41,6 +42,7 @@ if run_button:
     if master_file and upload_file:
         # Update the status to show "Processing..."
         status_placeholder.text("Processing...")
+        start_time = time.perf_counter()
 
         master_df = pd.read_excel(master_file)
 
@@ -70,6 +72,7 @@ if run_button:
                 st.dataframe(missing_dropoff[['DropOffPostal']].drop_duplicates())
 
             status_placeholder.success("Completed!")
+            st.info(f"Processing time: {time.perf_counter() - start_time:.2f} seconds")
         else:
             dropoff_df.dropna(subset=['PickUp_Latitude', 'PickUp_Longitude', 'DropOff_Latitude', 'DropOff_Longitude'], inplace=True)
 
@@ -292,6 +295,7 @@ if run_button:
             dropoff_df.to_excel(output_excel_file_path, index=False)
 
             status_placeholder.success("Completed!")
+            st.info(f"Processing time: {time.perf_counter() - start_time:.2f} seconds")
 
             with download_placeholder:
                 with open(output_excel_file_path, "rb") as file:
