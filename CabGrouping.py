@@ -7,7 +7,7 @@ import math
 from sklearn.cluster import KMeans
 from geopy.distance import geodesic
 
-__version__ = "v0.0.1.2"
+__version__ = "v0.0.1.3"
 
 if 'max_distance' not in st.session_state:
     st.session_state.max_distance = 0
@@ -147,7 +147,7 @@ if run_button:
                     return digits.zfill(6)
                 return digits[:6]
 
-            def assign_groups_dropoff_first(df, max_group_size=4, start_counter=1):
+            def assign_groups_dropoff_first(df, max_group_size=4):
                 # Keep the same drop-off together (split only if > max_group_size).
                 centroid = (df['DropOff_Latitude'].mean(), df['DropOff_Longitude'].mean())
                 dropoff_groups = []
@@ -185,15 +185,7 @@ if run_button:
                         else:
                             best_taxi['indices'].extend(chunk)
 
-                assignments = {}
-                taxi_counter = start_counter
-                for taxi in taxis:
-                    for idx in taxi['indices']:
-                        assignments[idx] = f'Taxi {taxi_counter}'
-                    taxi_counter += 1
-
-                df['TaxiGroup'] = df.index.map(assignments.get)
-                return df, taxi_counter
+                return taxis
 
             dropoff_df['DropOffPostalNorm'] = dropoff_df['DropOffPostal'].apply(normalize_postal)
             dropoff_df['DropOffSector'] = dropoff_df['DropOffPostalNorm'].apply(
@@ -211,11 +203,48 @@ if run_button:
 
                 sector_results = []
                 for _, cluster_df in sector_df.groupby('Cluster'):
-                    cluster_df, taxi_counter = assign_groups_dropoff_first(
+                    taxis = assign_groups_dropoff_first(
                         cluster_df,
-                        max_group_size=4,
-                        start_counter=taxi_counter
+                        max_group_size=4
                     )
+
+                    centroid_rows = []
+                    for i, taxi in enumerate(taxis):
+                        sub = cluster_df.loc[taxi['indices']]
+                        centroid_rows.append({
+                            'idx': i,
+                            'lat': sub['DropOff_Latitude'].mean(),
+                            'lon': sub['DropOff_Longitude'].mean()
+                        })
+
+                    centroid_df = pd.DataFrame(centroid_rows)
+                    if len(centroid_df) > 1:
+                        n_clusters = min(len(centroid_df), max(1, math.ceil(len(centroid_df) / 4)))
+                        if n_clusters > 1:
+                            kmeans = KMeans(n_clusters=n_clusters, n_init=10, random_state=0).fit(
+                                centroid_df[['lat', 'lon']]
+                            )
+                            centroid_df['Cluster'] = kmeans.labels_
+                            cluster_centroids = centroid_df.groupby('Cluster')[['lat', 'lon']].mean()
+                            centroid_df = centroid_df.join(cluster_centroids, on='Cluster', rsuffix='_c')
+                            centroid_df['DistToCluster'] = centroid_df.apply(
+                                lambda r: calculate_distance((r['lat'], r['lon']), (r['lat_c'], r['lon_c'])),
+                                axis=1
+                            )
+                            centroid_df = centroid_df.sort_values(by=['Cluster', 'DistToCluster'])
+                        else:
+                            sector_centroid = (centroid_df['lat'].mean(), centroid_df['lon'].mean())
+                            centroid_df['DistToSector'] = centroid_df.apply(
+                                lambda r: calculate_distance((r['lat'], r['lon']), sector_centroid),
+                                axis=1
+                            )
+                            centroid_df = centroid_df.sort_values(by='DistToSector')
+
+                    for i in centroid_df['idx'].tolist():
+                        for row_idx in taxis[i]['indices']:
+                            cluster_df.at[row_idx, 'TaxiGroup'] = f'Taxi {taxi_counter}'
+                        taxi_counter += 1
+
                     sector_results.append(cluster_df)
 
                 grouped_results.append(pd.concat(sector_results, ignore_index=False))
