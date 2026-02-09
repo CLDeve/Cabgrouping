@@ -7,7 +7,7 @@ import math
 from sklearn.cluster import KMeans
 from geopy.distance import geodesic
 
-__version__ = "v0.0.1.1"
+__version__ = "v0.0.1.2"
 
 if 'max_distance' not in st.session_state:
     st.session_state.max_distance = 0
@@ -203,12 +203,22 @@ if run_button:
             grouped_results = []
             taxi_counter = 1
             for _, sector_df in dropoff_df.groupby('DropOffSector', dropna=False):
-                sector_df, taxi_counter = assign_groups_dropoff_first(
-                    sector_df,
-                    max_group_size=4,
-                    start_counter=taxi_counter
-                )
-                grouped_results.append(sector_df)
+                centroid = calculate_centroid(sector_df)
+                sector_df = sort_by_distance_from_centroid(sector_df, centroid)
+
+                num_clusters = determine_clusters_needed(sector_df, max_group_size=4)
+                sector_df, _ = cluster_passengers(sector_df, num_clusters)
+
+                sector_results = []
+                for _, cluster_df in sector_df.groupby('Cluster'):
+                    cluster_df, taxi_counter = assign_groups_dropoff_first(
+                        cluster_df,
+                        max_group_size=4,
+                        start_counter=taxi_counter
+                    )
+                    sector_results.append(cluster_df)
+
+                grouped_results.append(pd.concat(sector_results, ignore_index=False))
 
             dropoff_df = pd.concat(grouped_results, ignore_index=True)
 
