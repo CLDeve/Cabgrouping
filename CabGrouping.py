@@ -7,7 +7,7 @@ import math
 from sklearn.cluster import KMeans
 from geopy.distance import geodesic
 
-__version__ = "v0.0.1.0"
+__version__ = "v0.0.1.1"
 
 if 'max_distance' not in st.session_state:
     st.session_state.max_distance = 0
@@ -147,6 +147,54 @@ if run_button:
                     return digits.zfill(6)
                 return digits[:6]
 
+            def assign_groups_dropoff_first(df, max_group_size=4, start_counter=1):
+                # Keep the same drop-off together (split only if > max_group_size).
+                centroid = (df['DropOff_Latitude'].mean(), df['DropOff_Longitude'].mean())
+                dropoff_groups = []
+                for dropoff, g in df.groupby('DropOffPostal'):
+                    lat = g['DropOff_Latitude'].mean()
+                    lon = g['DropOff_Longitude'].mean()
+                    dist = calculate_distance(centroid, (lat, lon))
+                    dropoff_groups.append({
+                        'dropoff': dropoff,
+                        'indices': g.index.tolist(),
+                        'dist': dist
+                    })
+
+                dropoff_groups = sorted(dropoff_groups, key=lambda x: x['dist'])
+
+                taxis = []
+                for group in dropoff_groups:
+                    indices = group['indices']
+                    chunks = [indices[i:i + max_group_size] for i in range(0, len(indices), max_group_size)]
+
+                    for chunk in chunks:
+                        best_taxi = None
+                        best_score = None
+                        for taxi in taxis:
+                            capacity_left = max_group_size - len(taxi['indices'])
+                            if len(chunk) > capacity_left:
+                                continue
+                            score = capacity_left - len(chunk)
+                            if best_score is None or score < best_score:
+                                best_score = score
+                                best_taxi = taxi
+
+                        if best_taxi is None:
+                            taxis.append({'indices': list(chunk)})
+                        else:
+                            best_taxi['indices'].extend(chunk)
+
+                assignments = {}
+                taxi_counter = start_counter
+                for taxi in taxis:
+                    for idx in taxi['indices']:
+                        assignments[idx] = f'Taxi {taxi_counter}'
+                    taxi_counter += 1
+
+                df['TaxiGroup'] = df.index.map(assignments.get)
+                return df, taxi_counter
+
             dropoff_df['DropOffPostalNorm'] = dropoff_df['DropOffPostal'].apply(normalize_postal)
             dropoff_df['DropOffSector'] = dropoff_df['DropOffPostalNorm'].apply(
                 lambda x: x[:2] if x else None
@@ -155,16 +203,8 @@ if run_button:
             grouped_results = []
             taxi_counter = 1
             for _, sector_df in dropoff_df.groupby('DropOffSector', dropna=False):
-                centroid = calculate_centroid(sector_df)
-                sector_df = sort_by_distance_from_centroid(sector_df, centroid)
-
-                num_clusters = determine_clusters_needed(sector_df, max_group_size=4)
-
-                sector_df, _ = cluster_passengers(sector_df, num_clusters)
-
-                sector_df, taxi_counter = adjust_groups(
+                sector_df, taxi_counter = assign_groups_dropoff_first(
                     sector_df,
-                    max_unique_postals=4,
                     max_group_size=4,
                     start_counter=taxi_counter
                 )
