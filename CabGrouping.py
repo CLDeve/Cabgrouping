@@ -7,12 +7,15 @@ import math
 from sklearn.cluster import KMeans
 from geopy.distance import geodesic
 
+__version__ = "v0.0.1.0"
+
 if 'max_distance' not in st.session_state:
     st.session_state.max_distance = 0
 
 st.set_page_config(layout="wide")
 
 st.markdown("<h1 style='text-align: center;'>Taxi Grouping Optimization</h1>", unsafe_allow_html=True)
+st.caption(f"Version {__version__}")
 
 with st.sidebar:
     st.header("Upload Master File")
@@ -95,11 +98,11 @@ if run_button:
                 df['Cluster'] = kmeans.labels_
                 return df, kmeans
 
-            def adjust_groups(df, max_unique_postals=4, max_group_size=4):
+            def adjust_groups(df, max_unique_postals=4, max_group_size=4, start_counter=1):
                 adjusted_df = pd.DataFrame(columns=df.columns)
                 adjusted_df['TaxiGroup'] = ''  # Initialize the 'TaxiGroup' column with empty strings
 
-                taxi_group_counter = 1
+                taxi_group_counter = start_counter
                 for cluster in df['Cluster'].unique():
                     cluster_df = df[df['Cluster'] == cluster].copy()
 
@@ -132,17 +135,42 @@ if run_button:
 
                         taxi_group_counter += 1
 
-                return adjusted_df
+                return adjusted_df, taxi_group_counter
 
-            centroid = calculate_centroid(dropoff_df)
+            def normalize_postal(code):
+                if pd.isna(code):
+                    return None
+                digits = ''.join(ch for ch in str(code).strip() if ch.isdigit())
+                if len(digits) < 2:
+                    return None
+                if len(digits) <= 6:
+                    return digits.zfill(6)
+                return digits[:6]
 
-            dropoff_df = sort_by_distance_from_centroid(dropoff_df, centroid)
+            dropoff_df['DropOffPostalNorm'] = dropoff_df['DropOffPostal'].apply(normalize_postal)
+            dropoff_df['DropOffSector'] = dropoff_df['DropOffPostalNorm'].apply(
+                lambda x: x[:2] if x else None
+            )
 
-            num_clusters = determine_clusters_needed(dropoff_df, max_group_size=4)
+            grouped_results = []
+            taxi_counter = 1
+            for _, sector_df in dropoff_df.groupby('DropOffSector', dropna=False):
+                centroid = calculate_centroid(sector_df)
+                sector_df = sort_by_distance_from_centroid(sector_df, centroid)
 
-            dropoff_df, kmeans = cluster_passengers(dropoff_df, num_clusters)
+                num_clusters = determine_clusters_needed(sector_df, max_group_size=4)
 
-            dropoff_df = adjust_groups(dropoff_df, max_unique_postals=4, max_group_size=4)
+                sector_df, _ = cluster_passengers(sector_df, num_clusters)
+
+                sector_df, taxi_counter = adjust_groups(
+                    sector_df,
+                    max_unique_postals=4,
+                    max_group_size=4,
+                    start_counter=taxi_counter
+                )
+                grouped_results.append(sector_df)
+
+            dropoff_df = pd.concat(grouped_results, ignore_index=True)
 
             output_excel_file_path = 'Taxi_Grouped_Data.xlsx'
             dropoff_df.to_excel(output_excel_file_path, index=False)
