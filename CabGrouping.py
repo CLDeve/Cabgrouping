@@ -7,7 +7,7 @@ import math
 from sklearn.cluster import KMeans
 from geopy.distance import geodesic
 
-__version__ = "v0.0.1.4"
+__version__ = "v0.0.1.5"
 
 if 'max_distance' not in st.session_state:
     st.session_state.max_distance = 0
@@ -32,6 +32,7 @@ with st.sidebar:
     run_button = st.button('Run Grouping and Clustering')
 
     status_placeholder = st.empty()
+    progress_placeholder = st.empty()
 
     st.write("###")
 
@@ -41,19 +42,24 @@ if run_button:
     if master_file and upload_file:
         # Update the status to show "Processing..."
         status_placeholder.text("Processing...")
+        progress_bar = progress_placeholder.progress(0)
 
         master_df = pd.read_excel(master_file)
+        progress_bar.progress(10)
 
         upload_df = pd.read_excel(upload_file)
+        progress_bar.progress(20)
 
         if 'StaffID' in upload_df.columns:
             upload_df = upload_df.drop_duplicates(subset=['StaffID'], keep='first')
 
         pickup_df = upload_df.merge(master_df, left_on='PickUpPostal', right_on='PostalCode', how='left', suffixes=('', '_Pickup'))
         pickup_df.rename(columns={'Latitude': 'PickUp_Latitude', 'Longitude': 'PickUp_Longitude'}, inplace=True)
+        progress_bar.progress(30)
 
         dropoff_df = pickup_df.merge(master_df, left_on='DropOffPostal', right_on='PostalCode', how='left', suffixes=('', '_DropOff'))
         dropoff_df.rename(columns={'Latitude': 'DropOff_Latitude', 'Longitude': 'DropOff_Longitude'}, inplace=True)
+        progress_bar.progress(40)
 
         missing_pickup = dropoff_df[dropoff_df['PickUp_Latitude'].isna() | dropoff_df['PickUp_Longitude'].isna()]
         missing_dropoff = dropoff_df[dropoff_df['DropOff_Latitude'].isna() | dropoff_df['DropOff_Longitude'].isna()]
@@ -70,8 +76,10 @@ if run_button:
                 st.dataframe(missing_dropoff[['DropOffPostal']].drop_duplicates())
 
             status_placeholder.success("Completed!")
+            progress_bar.progress(100)
         else:
             dropoff_df.dropna(subset=['PickUp_Latitude', 'PickUp_Longitude', 'DropOff_Latitude', 'DropOff_Longitude'], inplace=True)
+            progress_bar.progress(50)
 
             def calculate_distance(point1, point2):
                 return geodesic(point1, point2).kilometers
@@ -320,17 +328,21 @@ if run_button:
                 grouped_results.append(sector_df)
 
             dropoff_df = pd.concat(grouped_results, ignore_index=True)
+            progress_bar.progress(80)
             dropoff_df = mix_nearby_sectors(
                 dropoff_df,
                 max_group_size=4,
                 speed_kmh=80,
                 max_travel_minutes=45
             )
+            progress_bar.progress(90)
 
             output_excel_file_path = 'Taxi_Grouped_Data.xlsx'
             dropoff_df.to_excel(output_excel_file_path, index=False)
+            progress_bar.progress(95)
 
             status_placeholder.success("Completed!")
+            progress_bar.progress(100)
 
             with download_placeholder:
                 with open(output_excel_file_path, "rb") as file:
