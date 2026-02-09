@@ -7,7 +7,7 @@ import math
 from sklearn.cluster import KMeans
 from geopy.distance import geodesic
 
-__version__ = "v0.0.1.5"
+__version__ = "v0.0.1.6"
 
 if 'max_distance' not in st.session_state:
     st.session_state.max_distance = 0
@@ -267,7 +267,7 @@ if run_button:
             dropoff_df, kmeans = cluster_passengers(dropoff_df, num_clusters)
 
             dropoff_df = adjust_groups(dropoff_df, max_unique_postals=4, max_group_size=4)
-            dropoff_df = soft_merge_by_sector(dropoff_df, max_group_size=4, max_unique_postals=4, max_distance_km=5)
+            dropoff_df = soft_merge_by_sector(dropoff_df, max_group_size=4, max_unique_postals=4, max_distance_km=4)
 
             output_excel_file_path = 'Taxi_Grouped_Data.xlsx'
             dropoff_df.to_excel(output_excel_file_path, index=False)
