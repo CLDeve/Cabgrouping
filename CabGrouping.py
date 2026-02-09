@@ -7,7 +7,7 @@ import math
 from sklearn.cluster import KMeans
 from geopy.distance import geodesic
 
-__version__ = "v0.0.1.4"
+__version__ = "v0.0.1.5"
 
 if 'max_distance' not in st.session_state:
     st.session_state.max_distance = 0
@@ -162,7 +162,7 @@ if run_button:
 
                 return adjusted_df
 
-            def soft_merge_by_sector(df, max_group_size=4, max_unique_postals=4, max_distance_km=2):
+            def soft_merge_by_sector(df, max_group_size=4, max_unique_postals=4, max_distance_km=None):
                 def normalize_postal(code):
                     if pd.isna(code):
                         return None
@@ -223,8 +223,9 @@ if run_button:
                         for t, info in temp_taxis.items():
                             if len(info['indices']) >= max_group_size:
                                 continue
-                            if calculate_distance(row_point, info['centroid']) > max_distance_km:
-                                continue
+                            if max_distance_km is not None:
+                                if calculate_distance(row_point, info['centroid']) > max_distance_km:
+                                    continue
                             new_postals = info['postals'].union(row_postals)
                             if len(new_postals) > max_unique_postals:
                                 continue
@@ -267,7 +268,7 @@ if run_button:
             dropoff_df, kmeans = cluster_passengers(dropoff_df, num_clusters)
 
             dropoff_df = adjust_groups(dropoff_df, max_unique_postals=4, max_group_size=4)
-            dropoff_df = soft_merge_by_sector(dropoff_df, max_group_size=4, max_unique_postals=4, max_distance_km=2)
+            dropoff_df = soft_merge_by_sector(dropoff_df, max_group_size=4, max_unique_postals=4, max_distance_km=None)
 
             output_excel_file_path = 'Taxi_Grouped_Data.xlsx'
             dropoff_df.to_excel(output_excel_file_path, index=False)
