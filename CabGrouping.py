@@ -6,9 +6,8 @@ import streamlit.components.v1 as components
 import time
 import math
 from sklearn.cluster import KMeans
-from geopy.distance import geodesic
 
-__version__ = "v0.0.1.3"
+__version__ = "v0.0.1.4"
 
 if 'max_distance' not in st.session_state:
     st.session_state.max_distance = 0
@@ -77,7 +76,17 @@ if run_button:
             dropoff_df.dropna(subset=['PickUp_Latitude', 'PickUp_Longitude', 'DropOff_Latitude', 'DropOff_Longitude'], inplace=True)
 
             def calculate_distance(point1, point2):
-                return geodesic(point1, point2).kilometers
+                # Haversine approximation (faster than geodesic) for short distances.
+                lat1, lon1 = point1
+                lat2, lon2 = point2
+                r = 6371.0  # Earth radius in km
+                phi1 = math.radians(lat1)
+                phi2 = math.radians(lat2)
+                dphi = math.radians(lat2 - lat1)
+                dlambda = math.radians(lon2 - lon1)
+                a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+                c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+                return r * c
 
             def calculate_centroid(df):
                 avg_lat = df['PickUp_Latitude'].mean()
